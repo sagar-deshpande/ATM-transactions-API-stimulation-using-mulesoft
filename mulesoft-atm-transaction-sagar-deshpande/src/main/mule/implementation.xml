@@ -1,0 +1,415 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<mule xmlns:http="http://www.mulesoft.org/schema/mule/http" xmlns:vm="http://www.mulesoft.org/schema/mule/vm"
+	xmlns:validation="http://www.mulesoft.org/schema/mule/validation"
+	xmlns:email="http://www.mulesoft.org/schema/mule/email" xmlns:s3="http://www.mulesoft.org/schema/mule/s3" xmlns:db="http://www.mulesoft.org/schema/mule/db" xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core" xmlns="http://www.mulesoft.org/schema/mule/core" xmlns:doc="http://www.mulesoft.org/schema/mule/documentation" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd
+http://www.mulesoft.org/schema/mule/db http://www.mulesoft.org/schema/mule/db/current/mule-db.xsd
+http://www.mulesoft.org/schema/mule/s3 http://www.mulesoft.org/schema/mule/s3/current/mule-s3.xsd
+http://www.mulesoft.org/schema/mule/email http://www.mulesoft.org/schema/mule/email/current/mule-email.xsd
+http://www.mulesoft.org/schema/mule/validation http://www.mulesoft.org/schema/mule/validation/current/mule-validation.xsd
+http://www.mulesoft.org/schema/mule/vm http://www.mulesoft.org/schema/mule/vm/current/mule-vm.xsd
+http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd">
+	<validation:config name="Validation_Config" doc:name="Validation Config" doc:id="241d5b79-5af0-4435-9225-206001d32b8d" i18n="#[payload.atmPin[0] == vars.payload.atmPin]" />
+	<validation:config name="Validation_Config1" doc:name="Validation Config" doc:id="f87a245c-a574-4cc4-8fec-b58ee49c7724" i18n="#[vars.max_attempts_left &gt; 0]" />
+	<flow name="validation_check" doc:id="e42cbf9c-2d0b-4039-b85c-68325ed3af42" >
+		<db:select doc:name="Copy_of_Select" doc:id="555b2346-928f-4969-be4d-f5f09f767879" config-ref="Database_Config">
+			<db:sql><![CDATA[select accountStatus, atmPin, totalBalance, wrongPin from Bank_Transactions where custAccNum = :accountNo]]></db:sql>
+			<db:input-parameters><![CDATA[#[{
+	accountNo : vars.payload.accountNum as String
+}]]]></db:input-parameters>
+		</db:select>
+		<ee:transform doc:name="Copy_of_Transform Message" doc:id="f45e4679-dc55-4ef7-8df8-8be2df22d909">
+			<ee:message>
+				<ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+payload]]></ee:set-payload>
+			</ee:message>
+		</ee:transform>
+		<choice doc:name="Choice" doc:id="0622d766-71f2-4a99-abe8-136a999e7264">
+			<when expression='#[(not isEmpty(payload)) and (payload.accountStatus contains "Active")]'>
+				<validation:is-true doc:name="Is true" doc:id="5857d528-8e00-4b39-88c7-4d3f62083893" message="Incorrect Pin" expression="#[payload.atmPin[0] == vars.payload.atmPin]">
+					<error-mapping sourceType="VALIDATION:INVALID_BOOLEAN" targetType="APP:INVALID_PIN" />
+				</validation:is-true>
+			</when>
+			<when expression='#[(not isEmpty(payload)) and (payload.accountStatus contains "Block")]'>
+				<raise-error doc:name="Raise error" doc:id="aeb8cf7d-993f-467e-836d-6393d033cbc1" type="APP:ACCOUNT_BLOCKED" description="This account is blocked"/>
+			</when>
+			<otherwise>
+				<raise-error doc:name="Raise error" doc:id="120d01f3-5bbf-4838-90f3-ff8b95c1991c" type="APP:ACCOUNT_DOES_NOT_EXISTS" description="This Account does not exists"/>
+			</otherwise>
+		</choice>
+		<set-variable value="#[true]" doc:name="validation_pass" doc:id="09fe44cc-f3e8-43fb-867f-d6a6bb7b0fd2" variableName="validation_pass"/>
+	</flow>
+	<flow name="createAccount" doc:id="a808ee3e-5c88-451f-93e8-85c94d1edd70" >
+		<set-variable value="#[payload.accountNum as Number]" doc:name="accountNo" doc:id="a6e4c99b-9437-4131-8098-442999a5838d" variableName="accountNo"/>
+		<db:select doc:name="checkExistingAccount" doc:id="32304e34-13e6-4adf-a507-c8cbb5866369" config-ref="Database_Config" target="IsExisting">
+			<db:sql ><![CDATA[select * from Bank_Transactions where custAccNum = :accountNo]]></db:sql>
+			<db:input-parameters ><![CDATA[#[{
+	accountNo : vars.accountNo
+}]]]></db:input-parameters>
+		</db:select>
+		<choice doc:name="Choice" doc:id="c984de55-dec1-4b77-b1aa-6f9e3bfa7e65" >
+			<when expression="#[isEmpty(vars.IsExisting)]">
+				<flow-ref doc:name="insertAccount" doc:id="ae099990-eb66-49c4-9824-ef5b0eef6ea0" name="insertAccount"/>
+				<vm:publish doc:name="Publish" doc:id="356acf82-0a78-4ca2-9f70-46df4d3fddb7" config-ref="VM_Config" queueName="Email">
+					<vm:content ><![CDATA[#[output application/json
+---
+{
+	source: "Account created successfully",
+	accountNum: vars.payload_before_insert.accountNum as String,
+	mailId : vars.payload_before_insert.mailed as String,
+	bank : vars.attributes_before_insert.queryParams.bank as String
+}]]]></vm:content>
+				</vm:publish>
+				<flow-ref doc:name="insertToAmazon" doc:id="4fb20839-e6fb-4cc4-b9f0-4c4f01a81c92" name="InsertToAmazon" />
+				<ee:transform doc:name="Copy_of_Transform Message" doc:id="9a920851-d127-40f8-ac88-2bd5718a1b96" xsi:schemaLocation="http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd">
+			<ee:message>
+				<ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+"Account created successfully with account no " ++ vars.accountNo as String]]></ee:set-payload>
+			</ee:message>
+		</ee:transform>
+			</when>
+			<otherwise >
+				<set-payload value='#["Account " ++ vars.accountNo as String ++ " already exists"]' doc:name="Account Exists" doc:id="34e2ac8c-363f-42e3-8cb4-dd321b9e9740" />
+			</otherwise>
+		</choice>
+	</flow>
+	<flow name="insertAccount" doc:id="f6dd1824-0335-4408-8be9-8add2296f5d7" >
+		<set-variable value="#[attributes]" doc:name="Save attributes" doc:id="021f059b-c52a-4b97-a8f9-40c9bfa387a8" variableName="attributes_before_insert"/>
+		<set-variable value="#[payload]" doc:name="Save Payload" doc:id="d82f54c2-ca60-4173-b0c9-a9d2c5fb3970" variableName="payload_before_insert"/>
+		<db:insert doc:name="Insert" doc:id="cd844f6d-d794-4667-80b1-b7a8214a29de" config-ref="Database_Config">
+			<db:sql ><![CDATA[insert into Bank_Transactions (custName, custAccNum, atmPin, bankName, accountType, ifscCode, branchName, totalBalance, transactionTimeStamp, mailId, phoneNumber ) values (:custName, :custAccNum, :atmPin, :bankName, :accountType, :ifscCode, :branchName, :totalBalance, :transactionTimeStamp, :mailId, :phoneNumber)]]></db:sql>
+			<db:input-parameters ><![CDATA[#[{
+	custName: attributes.queryParams.customerName as String,
+	custAccNum: vars.accountNo as String,
+	atmPin: payload.atmPin as String,
+	bankName: attributes.queryParams.bank as String ,
+	accountType: attributes.queryParams.'type' as String,
+	ifscCode: payload.ifscCode as String,
+	branchName: attributes.queryParams.branchName as String,
+	totalBalance: payload.depositAmount default 0,
+	transactionTimeStamp: now() as String,
+	mailId: payload.mailed as String,
+	phoneNumber: payload.contact as String
+}]]]></db:input-parameters>
+		</db:insert>
+		<ee:transform doc:name="Transform Message" doc:id="fd6516f7-4b65-4c35-b207-909838ab2712" >
+			<ee:message >
+			</ee:message>
+			<ee:variables >
+				<ee:set-variable variableName="attributes" ><![CDATA[%dw 2.0
+output application/json
+---
+vars.attributes_before_insert]]></ee:set-variable>
+			</ee:variables>
+		</ee:transform>
+		<ee:transform doc:name="Transform Message" doc:id="5aadf127-d947-4bd9-8291-e67d49717675" >
+			<ee:message >
+				<ee:set-payload ><![CDATA[%dw 2.0
+output application/json
+---
+payload]]></ee:set-payload>
+			</ee:message>
+		</ee:transform>
+	</flow>
+	<flow name="InsertToAmazon" doc:id="7b2bfac0-2a47-4640-b9f8-cdd7e45bc725" >
+		<s3:create-object doc:name="Create object" doc:id="de039d20-65a3-4acb-809f-8615d501c9e6" config-ref="Amazon_S3_Configuration" bucketName="mulesoft-sagardeshpande" key='#[vars.accountNo as String ++ "_" ++ vars.attributes_before_insert.queryParams.customerName as String ++".json"]'>
+			<s3:object-content><![CDATA[#[output application/json
+---
+{
+	custName: vars.attributes_before_insert.queryParams.customerName as String,
+	custAccNum: vars.accountNo as String,
+	atmPin: vars.payload_before_insert.atmPin as String,
+	bankName: vars.attributes_before_insert.queryParams.bank as String ,
+	accountType: vars.attributes_before_insert.queryParams.'type' as String,
+	ifscCode: vars.payload_before_insert.ifscCode as String,
+	branchName: vars.attributes_before_insert.queryParams.branchName as String,
+	totalBalance: vars.payload_before_insert.depositAmount default 0,
+	transactionTimeStamp: now() as String,
+	mailId: vars.payload_before_insert.mailed as String,
+	phoneNumber: vars.payload_before_insert.contact as String
+}]]]></s3:object-content>
+		</s3:create-object>
+	</flow>
+	<flow name="sendEmail" doc:id="f9081653-033f-4cfb-934d-151005773d04" initialState="stopped">
+		<db:listener table="Bank_Transactions" doc:name="On Table Row" doc:id="1a219cf8-75ae-4cdc-89b4-4badaf20b5d8" config-ref="Database_Config" watermarkColumn="pk">
+			<scheduling-strategy >
+				<fixed-frequency />
+			</scheduling-strategy>
+		</db:listener>
+		<ee:transform doc:name="Transform Message" doc:id="beb05193-192a-40ab-83dc-523fea0ccbe4" >
+			<ee:message >
+				<ee:set-payload ><![CDATA[%dw 2.0
+output application/json
+---
+payload]]></ee:set-payload>
+			</ee:message>
+		</ee:transform>
+		<email:send doc:name="Send" doc:id="7418dd16-401d-4b50-88b7-90f2c2f9b42e" config-ref="Email_SMTP" fromAddress='#["deshpande.sagar1911@gmail.com"]' subject=" Congratulations ! Account created">
+			<email:to-addresses >
+				<email:to-address value="#[payload.mailId]" />
+			</email:to-addresses>
+			<email:body >
+				<email:content ><![CDATA[#["Congratulations ! Your account is created Successfully with
+Account Number " ++ payload.custAccNum ++ " with " ++ payload.bankName ++ " bank."]]]></email:content>
+			</email:body>
+		</email:send>
+		<logger level="INFO" doc:name="Logger" doc:id="aad339bf-a460-4cc3-9d48-ab35c7747a53" message="Email sent"/>
+	</flow>
+	<flow name="Email_sender" doc:id="1b607b5b-e8a5-425b-b3dc-40b41a16d89e" >
+		<vm:listener queueName="Email" doc:name="Listen to Email Queue" doc:id="6e6e26ee-1642-4130-8958-6339c53a0b8f" config-ref="VM_Config"/>
+		<choice doc:name="Choice" doc:id="550125fa-886a-4666-a989-add861b1ff69" >
+			<when expression='#[payload.source == "Invalid Pin"]'>
+				<db:select doc:name="Select" doc:id="336528a6-83ad-444c-a2da-f93e59cceed8" config-ref="Database_Config">
+					<db:sql><![CDATA[select mailId from Bank_Transactions where custAccNum = :custAccNum]]></db:sql>
+					<db:input-parameters><![CDATA[#[{
+	custAccNum : payload.accountNum as String
+}]]]></db:input-parameters>
+				</db:select>
+				<email:send doc:name="Copy_of_Send" doc:id="ef798d51-83dd-4c19-b979-823b2a455ad3" config-ref="Email_SMTP" fromAddress='#["deshpande.sagar1911@gmail.com"]' subject="Failed Attempt !" >
+					<email:to-addresses >
+						<email:to-address value="#[payload.mailId[0]]" />
+					</email:to-addresses>
+					<email:body >
+						<email:content ><![CDATA[This is to inform you that there’s a failed attempt happened
+while transaction . Your Account will be blocked after 3 attempts]]></email:content>
+					</email:body>
+				</email:send>
+			</when>
+			<when expression='#[payload.source == "MAX FAILED ATTEMPTS REACH"]'>
+				<db:select doc:name="Copy_of_Select" doc:id="f34a5f48-0254-4097-9010-ec4c807a36af" config-ref="Database_Config">
+					<db:sql><![CDATA[select mailId from Bank_Transactions where custAccNum = :custAccNum]]></db:sql>
+					<db:input-parameters><![CDATA[#[{
+	custAccNum : payload.accountNum as String
+}]]]></db:input-parameters>
+				</db:select>
+				<email:send doc:name="Send" doc:id="15c9dd22-1d70-4eea-ad04-406018ad77a3" config-ref="Email_SMTP" fromAddress="${email.username}" subject="Account Blocked !">
+					<email:to-addresses >
+						<email:to-address value="#[payload.mailId[0]]" />
+					</email:to-addresses>
+					<email:body >
+						<email:content ><![CDATA[This is to inform you that Your Account has been be blocked
+due to 3 failed attempts. Please reach out nearest branch to unblock]]></email:content>
+					</email:body>
+				</email:send>
+			</when>
+			<when expression='#[payload.source == "Withdraw successful"]'>
+				<set-variable value="#[payload]" doc:name="save payload" doc:id="d62364e9-d8d5-449d-be82-d02aab11939a" variableName="payload"/>
+				<db:select doc:name="Copy_of_Select" doc:id="4364c72f-a774-4797-b450-97316ce7d2ff" config-ref="Database_Config">
+					<db:sql><![CDATA[select mailId from Bank_Transactions where custAccNum = :custAccNum]]></db:sql>
+					<db:input-parameters><![CDATA[#[{
+	custAccNum : payload.custAccNum as String
+}]]]></db:input-parameters>
+				</db:select>
+				<email:send doc:name="Send" doc:id="6f26e6b0-10c3-49b7-8613-549b67915e2e" config-ref="Email_SMTP" fromAddress="${email.username}" subject="Transaction Alert!">
+					<email:to-addresses >
+						<email:to-address value="#[payload.mailId[0]]" />
+					</email:to-addresses>
+					<email:body >
+						<email:content ><![CDATA[#["This is to inform you that Your Account has been debited with " ++ vars.payload.debited_amount as String ++ " amount and your total balance is " ++ vars.payload.balance_left]]]></email:content>
+					</email:body>
+				</email:send>
+			</when>
+			<when expression='#[payload.source == "Account unblocked"]'>
+				<db:select doc:name="Select" doc:id="5ed9405f-4850-40cd-b9d7-951daf55515d" config-ref="Database_Config">
+					<db:sql ><![CDATA[select mailId from Bank_Transactions where custAccNum = :custAccNum]]></db:sql>
+					<db:input-parameters ><![CDATA[#[{
+	custAccNum : payload.accountNum
+}]]]></db:input-parameters>
+				</db:select>
+				<email:send doc:name="Send" doc:id="0b574551-d9c1-4b2d-92ce-a24e1c49470d" config-ref="Email_SMTP" fromAddress="${email.username}" subject="Account Unblocked!">
+					<email:to-addresses >
+						<email:to-address value="#[payload.mailId[0]]" />
+					</email:to-addresses>
+					<email:body >
+						<email:content ><![CDATA[This is to inform you that Your Account has been unblocked.]]></email:content>
+					</email:body>
+				</email:send>
+				<logger level="INFO" doc:name="Logger" doc:id="062de3c3-c161-4d09-bafc-e1ce7aa0da49" message="Email sent"/>
+			</when>
+			<when expression='#[payload.source == "Account created successfully"]'>
+				<email:send doc:name="Send" doc:id="6bac8a89-7754-4e6a-b360-d3f62e4125e4" config-ref="Email_SMTP" fromAddress="${email.username}" subject="Congratulations ! Account created">
+					<email:to-addresses >
+						<email:to-address value="#[payload.mailId]" />
+					</email:to-addresses>
+					<email:body >
+						<email:content ><![CDATA[#["Congratulations ! Your account is created Successfully with
+Account Number " ++ payload.accountNum as String ++ " with " ++ payload.bank ++ " bank."]]]></email:content>
+					</email:body>
+				</email:send>
+			</when>
+			<otherwise >
+				<logger level="INFO" doc:name="Logger" doc:id="e166a1a8-283f-4e48-905b-c70ff6c4cdf5" />
+			</otherwise>
+		</choice>
+	</flow>
+	<flow name="checkBalance" doc:id="ab1fb0fb-c2a3-4f50-9f93-48c859ae2206" >
+		<set-variable value="#[attributes.queryParams]" doc:name="queryParams" doc:id="aadf5204-e565-4534-ac96-215a94018e4c" variableName="attributes"/>
+		<set-variable value="#[payload]" doc:name="payload" doc:id="360f32eb-a2ec-4023-8178-cc83c76af3cd" variableName="payload"/>
+		<set-variable value="#[false]" doc:name="validation_pass" doc:id="2463a365-8e3d-45c7-94be-f26046e27630" variableName="validation_pass"/>
+		<flow-ref doc:name="Flow Reference" doc:id="60553515-eac3-410b-bd6a-b354ce18faa2" name="validation_check" />
+		<choice doc:name="Choice" doc:id="672cd04f-0dca-41d9-b624-30b800131257" >
+			<when expression="#[vars.validation_pass]">
+				<ee:transform doc:name="Copy_of_Copy_of_Transform Message" doc:id="6b4db2f9-c2f1-4391-aba0-5bd9cda6749c" xsi:schemaLocation="http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd">
+			<ee:message>
+				<ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+  status: "Your total balance is " ++ payload.totalBalance[0] as String ++ " as on " ++ now() as String {format: "dd-MMM-y"}
+}]]></ee:set-payload>
+			</ee:message>
+		</ee:transform>
+			</when>
+			<otherwise >
+				<set-payload value="#[payload]" doc:name="Set Payload" doc:id="2825d043-884c-4139-a7e7-c146d6948cf8" />
+			</otherwise>
+		</choice>
+	</flow>
+	<flow name="withdraw" doc:id="d4a101e7-65ff-42b0-b8eb-941db46b67ab" >
+		<set-variable value="#[attributes]" doc:name="Save attributes" doc:id="d92b2a7a-aaf1-47d4-9860-4b887928db5f" variableName="attributes"/>
+		<set-variable value="#[payload]" doc:name="Save payload" doc:id="56d21663-f45d-4f79-b4a3-4406147731b4" variableName="payload"/>
+		<set-variable value="#[false]" doc:name="validation_pass" doc:id="a95ceb4d-31e6-4985-8838-751e3a64c05a" variableName="validation_pass"/>
+		<flow-ref doc:name="validation check" doc:id="8b21879e-3051-475e-8c85-0af302cf546b" name="validation_check"/>
+		<choice doc:name="Choice" doc:id="3507aedd-7cd8-491c-a07f-50b3b605541e" >
+			<when expression="#[vars.validation_pass]">
+				<validation:is-true doc:name="Is true" doc:id="d784ee97-13be-4d17-a240-a22007387f84" message="Insufficient Balance" expression="#[payload.totalBalance[0]  &gt;= vars.payload.amountToBeWithdraw]">
+			<error-mapping sourceType="VALIDATION:INVALID_BOOLEAN" targetType="APP:INSUFFICIENT_BALANCE" />
+		</validation:is-true>
+				<set-variable value="#[(payload.totalBalance[0] - vars.payload.amountToBeWithdraw) as Number]" doc:name="Update balance" doc:id="d658035c-6687-4aa8-bb14-0f6a3b6aac85" variableName="balance_left" />
+				<db:update doc:name="Update" doc:id="2a3f610c-0183-4b0d-b3a7-ec8bd357340f" config-ref="Database_Config">
+			<db:sql><![CDATA[update Bank_Transactions set totalBalance = :balance_left where custAccNum = :custAccNum]]></db:sql>
+			<db:input-parameters><![CDATA[#[{
+	balance_left : vars.balance_left,
+	custAccNum : vars.payload.accountNum
+}]]]></db:input-parameters>
+		</db:update>
+				<vm:publish queueName="Email" doc:name="Publish" doc:id="f51a6971-3ae7-4090-a42b-9cabb54fe693" config-ref="VM_Config">
+			<vm:content><![CDATA[#[{
+	source : "Withdraw successful",
+	custAccNum : vars.payload.accountNum,
+	debited_amount : vars.payload.amountToBeWithdraw,
+	balance_left : vars.balance_left
+}]]]></vm:content>
+		</vm:publish>
+				<ee:transform doc:name="Copy_of_Transform Message" doc:id="9adf71c9-4142-4fa4-a822-b7df92a96092" xsi:schemaLocation="http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd">
+			<ee:message>
+				<ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+  status: "Amount " ++ vars.payload.amountToBeWithdraw as String ++ " has been debited. Your total balance is " ++ vars.balance_left as String ++ "."
+}]]></ee:set-payload>
+			</ee:message>
+		</ee:transform>
+			</when>
+			<otherwise >
+				<set-payload value="#[payload]" doc:name="Set Payload" doc:id="4d4f8ff6-2f84-4114-b8a4-52ca1745f840" />
+			</otherwise>
+		</choice>
+	</flow>
+	<flow name="unblock" doc:id="1df46201-961e-4889-ba23-c752a5f15141" >
+		<set-variable value="#[attributes]" doc:name="save attributes" doc:id="8f4e913e-0643-446b-8a76-2d67337232f5" variableName="attributes"/>
+		<set-variable value="#[payload]" doc:name="save payload" doc:id="fed6b5b2-67d6-415b-af88-54036b968fa7" variableName="payload"/>
+		<validation:is-true doc:name="Is true" doc:id="a28ff479-9ff1-4939-94c2-c474501ed1ff" expression='#[payload.user == "admin" and payload.password == "admin"]'>
+			<error-mapping sourceType="VALIDATION:INVALID_BOOLEAN" targetType="APP:NOT_AN_ADMIN" />
+		</validation:is-true>
+		<db:select doc:name="Select" doc:id="239f2a16-422c-4a92-8bcb-fd092a8726a1" config-ref="Database_Config">
+			<db:sql ><![CDATA[select accountStatus from Bank_Transactions where custAccNum = :custAccNum and bankName = :bankName]]></db:sql>
+			<db:input-parameters ><![CDATA[#[{
+	custAccNum : payload.accountNum,
+	bankName : payload.bank
+}]]]></db:input-parameters>
+		</db:select>
+		<ee:transform doc:name="Transform Message" doc:id="c86bb901-8cce-4907-8257-3432c3ce6fda" >
+			<ee:message >
+				<ee:set-payload ><![CDATA[%dw 2.0
+output application/json
+---
+payload]]></ee:set-payload>
+			</ee:message>
+		</ee:transform>
+		<choice doc:name="Choice" doc:id="4219b9a3-8a1f-4e64-93de-31a79af4c558" >
+			<when expression="#[not isEmpty(payload)]">
+				<choice doc:name="Choice" doc:id="ea80bfd2-2e0c-4675-a5fe-a4f317a1c94c" >
+					<when expression='#[payload.accountStatus[0] == "Block"]'>
+						<db:update doc:name="Update" doc:id="fbc9d81c-1976-41ff-8cbe-1460dd240f18" config-ref="Database_Config">
+							<db:sql ><![CDATA[update Bank_Transactions set accountStatus = "Active", wrongPin = 0 where custAccNum = :custAccNum and bankName = :bankName]]></db:sql>
+							<db:input-parameters ><![CDATA[#[{
+	custAccNum : vars.payload.accountNum,
+	bankName : vars.payload.bank
+}]]]></db:input-parameters>
+						</db:update>
+						<vm:publish queueName="Email" doc:name="Publish" doc:id="89013c2d-730e-47c8-bdba-0dd2aee87ccc" config-ref="VM_Config">
+							<vm:content ><![CDATA[#[{
+	source : "Account unblocked",
+	accountNum : vars.payload.accountNum
+}]]]></vm:content>
+						</vm:publish>
+						<ee:transform doc:name="Copy_of_Transform Message" doc:id="62967481-45ff-4f90-9728-2aa769149bbd" xsi:schemaLocation="http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd">
+			<ee:message>
+				<ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+  "“status”": "“Account " ++ vars.payload.accountNum as String ++ " is unblocked”"
+}]]></ee:set-payload>
+			</ee:message>
+		</ee:transform>
+					</when>
+					<when expression='#[payload.accountStatus[0] == "Active"]'>
+						<set-payload value='#["Account " ++ vars.payload.accountNum as String ++ " is active."]' doc:name="Set Payload" doc:id="5aff54a2-558f-47f9-9043-abfd4fd7405e" />
+					</when>
+					<otherwise>
+						<raise-error doc:name="Raise error" doc:id="acb1e5ae-ba91-4b2d-8835-e0b39dd276fb" type="APP:ACCOUNT_STATUS_UNKNOWN"/>
+					</otherwise>
+				</choice>
+			</when>
+			<otherwise >
+				<set-payload value='#["Account " ++ vars.payload.accountNum as String ++ " does not exist."]' doc:name="Set Payload" doc:id="608d9c8c-5fbf-4c68-ac98-7ecf7eca4b8c" />
+			</otherwise>
+		</choice>
+	</flow>
+	<flow name="Daily_scheduler_that_sends_email_to_customers" doc:id="0051f026-827d-47af-b40a-7ef3b8882b3b" >
+		<http:listener doc:name="Listener" doc:id="5d6b4801-1ad1-4ffb-bfe6-66a271a8cc4c" config-ref="mulesoft-atm-transaction-sagar-deshpande-httpListenerConfig" path="/test"/>
+		<db:select doc:name="Select" doc:id="97ea7ff4-6cd9-4d12-bf4e-c59731169a99" config-ref="Database_Config">
+			<db:sql ><![CDATA[select * from Bank_Transactions]]></db:sql>
+		</db:select>
+		<ee:transform doc:name="Transform Message" doc:id="499b4121-8c19-4eb6-8738-88488909c7b9" >
+			<ee:message >
+				<ee:set-payload ><![CDATA[%dw 2.0
+output application/json
+---
+payload]]></ee:set-payload>
+			</ee:message>
+		</ee:transform>
+		<foreach doc:name="For Each" doc:id="1d04a463-c49d-4727-9de7-f361f4778ccb" >
+			<choice doc:name="Choice" doc:id="10109b29-83c9-45c4-a1c4-f7627cbc3c26" >
+				<when expression='#[payload.accountStatus == "Active"]'>
+					<email:send doc:name="Send" doc:id="e8bc6b82-f7e7-4f46-96d5-8525c5f60211" config-ref="Email_SMTP" fromAddress="${email.username}" subject="Todays Total Balance! ">
+						<email:to-addresses >
+							<email:to-address value="payload.mailId" />
+						</email:to-addresses>
+						<email:body >
+							<email:content ><![CDATA[#["Your total Balance as on Today is " ++ payload.totalBalance as String ++ "."]]]></email:content>
+						</email:body>
+					</email:send>
+				</when>
+				<otherwise >
+					<email:send doc:name="Send" doc:id="806f6aa4-b859-44a2-bf81-190d6bb88a22" config-ref="Email_SMTP" fromAddress="${email.username}" subject="Today's Total Balance!">
+						<email:to-addresses >
+							<email:to-address value="payload.mailId" />
+						</email:to-addresses>
+						<email:body >
+							<email:content ><![CDATA[#["Your account is blocked."]]]></email:content>
+						</email:body>
+					</email:send>
+				</otherwise>
+			</choice>
+		</foreach>
+	</flow>
+</mule>

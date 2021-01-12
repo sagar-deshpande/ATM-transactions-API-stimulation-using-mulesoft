@@ -1,0 +1,99 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<mule xmlns:vm="http://www.mulesoft.org/schema/mule/vm" xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+	xmlns:validation="http://www.mulesoft.org/schema/mule/validation"
+	xmlns:email="http://www.mulesoft.org/schema/mule/email" xmlns:s3="http://www.mulesoft.org/schema/mule/s3" xmlns:db="http://www.mulesoft.org/schema/mule/db" xmlns="http://www.mulesoft.org/schema/mule/core" xmlns:doc="http://www.mulesoft.org/schema/mule/documentation" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+http://www.mulesoft.org/schema/mule/db http://www.mulesoft.org/schema/mule/db/current/mule-db.xsd
+http://www.mulesoft.org/schema/mule/s3 http://www.mulesoft.org/schema/mule/s3/current/mule-s3.xsd
+http://www.mulesoft.org/schema/mule/email http://www.mulesoft.org/schema/mule/email/current/mule-email.xsd
+http://www.mulesoft.org/schema/mule/validation http://www.mulesoft.org/schema/mule/validation/current/mule-validation.xsd
+http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd
+http://www.mulesoft.org/schema/mule/vm http://www.mulesoft.org/schema/mule/vm/current/mule-vm.xsd">
+	<configuration-properties doc:name="Configuration properties" doc:id="4c65ef6a-49e3-4546-bc9a-f6724d50b74c" file="config.yaml" />
+	<db:config name="Database_Config" doc:name="Database Config" doc:id="3d5b7509-83a4-44bd-ab7c-6c56623b8930" >
+		<db:my-sql-connection host="${db.host}" port="${db.port}" user="${db.username}" password="${db.password}" database="${db.database}" />
+	</db:config>
+	<s3:config name="Amazon_S3_Configuration" doc:name="Amazon S3 Configuration" doc:id="f578cfcb-372a-4ae0-b628-bcfe611c025d" >
+		<s3:basic-connection accessKey="${s3.access-key}" secretKey="${s3.secret-key}" region="AP_SOUTH_1"/>
+	</s3:config>
+	<email:smtp-config name="Email_SMTP" doc:name="Email SMTP" doc:id="088e1d4d-3e88-4ed7-9bc1-6fa3ab290791" >
+		<email:smtp-connection host="${email.host}" user="deshpande.sagar1911@gmail.com" password="Ee004100" connectionTimeout="300" port="587">
+			<email:properties >
+				<email:property key="mail.smtp.starttls.enable" value="true" />
+			</email:properties>
+		</email:smtp-connection>
+	</email:smtp-config>
+	<configuration doc:name="Configuration" doc:id="a376ea4a-95c9-422a-bf43-c21c53d1a010" defaultErrorHandler-ref="globalError_Handler" />
+	<vm:config name="VM_Config" doc:name="VM Config" doc:id="8060429d-7582-4acb-9721-6bb7936f2dc4" >
+		<vm:queues >
+			<vm:queue queueName="Email" maxOutstandingMessages="10" />
+		</vm:queues>
+	</vm:config>
+	<error-handler name="globalError_Handler" doc:id="d6618bed-3136-4494-a080-00a5ec86cb7d" >
+		<on-error-continue enableNotifications="true" logException="true" doc:name="On Error Continue" doc:id="4dec88f5-2e87-49dd-a233-c20c402eb40a" type="APP:INVALID_PIN">
+			<validation:is-true doc:name="Is true" doc:id="50f798f4-8a16-47f3-b85c-9c2fe8af1b2f" expression="#[payload.wrongPin[0] &lt; 2]">
+				<error-mapping sourceType="VALIDATION:INVALID_BOOLEAN" targetType="APP:MAX_FAILED_ATTEMPTS_REACH" />
+			</validation:is-true>
+			<set-variable value="#[((payload.wrongPin[0] as Number) + 1) as Number]" doc:name="wrongPin" doc:id="f6826e10-274f-4011-b541-94082936074e" variableName="wronPin"/>
+			<db:update doc:name="Update" doc:id="65903117-5c59-4c66-9bb0-ba3fed673c88" config-ref="Database_Config">
+				<db:sql ><![CDATA[Update Bank_Transactions set wrongPin = wrongPin + 1 where custAccNum = :custAccNum]]></db:sql>
+				<db:input-parameters ><![CDATA[#[{
+	custAccNum : vars.payload.accountNum
+}]]]></db:input-parameters>
+			</db:update>
+			<vm:publish queueName="Email" doc:name="Publish" doc:id="1867b102-f537-4409-a1c1-2f27802b9e0a" config-ref="VM_Config">
+				<vm:content ><![CDATA[#[{
+	source : "Invalid Pin",
+	accountNum : vars.payload.accountNum as String
+}]]]></vm:content>
+			</vm:publish>
+			<set-payload value='#["Login Attempt Failed .Attempts
+left :" ++ (3 - vars.wronPin)]' doc:name="Set Payload" doc:id="abe478e3-1559-46d6-a1ef-08e8674d4fff" />
+		</on-error-continue>
+		<on-error-continue enableNotifications="true" logException="true" doc:name="On Error Continue" doc:id="3ad848ba-14a1-4bd1-a525-11b6b38fd0f6" type="APP:MAX_FAILED_ATTEMPTS_REACH">
+			<db:update doc:name="Update" doc:id="c2dc4185-93e4-4656-a429-ebc0c0e0b57c" config-ref="Database_Config" >
+				<db:sql ><![CDATA[update Bank_Transactions set accountStatus = "Block" where custAccNum = :custAccNum]]></db:sql>
+				<db:input-parameters ><![CDATA[#[{
+	custAccNum : vars.payload.accountNum as String
+}]]]></db:input-parameters>
+			</db:update>
+			<vm:publish doc:name="Publish" doc:id="5b9cf115-0eda-4d52-a538-c275066c2ebc" config-ref="VM_Config" queueName="Email">
+				<vm:content ><![CDATA[#[{
+	source : "MAX FAILED ATTEMPTS REACH",
+	accountNum : vars.payload.accountNum as String
+}]]]></vm:content>
+			</vm:publish>
+			<set-payload value='#["“Maximum Attempts reached .Your Account " ++ vars.payload.accountNum as String ++ " is temporarily blocked. Please reach nearest Branch."]' doc:name="Set Payload" doc:id="e4ab7483-79ea-49ed-ad5a-b88ff23dc465" />
+		</on-error-continue>
+		<on-error-continue enableNotifications="true" logException="true" doc:name="On Error Continue" doc:id="7abea0b4-2e38-4d5e-8c9c-c9903cce83a4" type="APP:ACCOUNT_BLOCKED">
+			<ee:transform doc:name="Copy_of_Transform Message" doc:id="a19e602d-f62e-41b7-bb58-8ed471a36401" >
+				<ee:message >
+					<ee:set-payload ><![CDATA[%dw 2.0
+output application/json
+---
+"Account " ++ vars.payload.accountNum as String ++ " is temporarily blocked. Please visit
+nearest Branch"]]></ee:set-payload>
+				</ee:message>
+			</ee:transform>
+		</on-error-continue>
+		<on-error-continue enableNotifications="true" logException="true" doc:name="On Error Continue" doc:id="620ee345-08c3-4c17-841a-696036c81734" type="APP:ACCOUNT_DOES_NOT_EXISTS">
+			<ee:transform doc:name="Copy_of_Transform Message" doc:id="ddfb65fe-67d9-4680-a490-89a3266197a4" >
+				<ee:message >
+					<ee:set-payload ><![CDATA[%dw 2.0
+output application/json
+---
+"Account " ++ (vars.payload.accountNum as String) ++ " does not exist or entered credentials are not correct. Enter valid details"]]></ee:set-payload>
+				</ee:message>
+			</ee:transform>
+		</on-error-continue>
+		<on-error-continue enableNotifications="true" logException="true" doc:name="On Error Continue" doc:id="b4d7e4f0-4787-49a2-8fe1-d54f4f3eabf8" type="APP:INSUFFICIENT_BALANCE">
+			<set-payload value="Insufficient Funds" doc:name="Set Payload" doc:id="3cc53607-0478-431d-9d61-9429155dbed5" />
+		</on-error-continue>
+		<on-error-continue enableNotifications="true" logException="true" doc:name="On Error Continue" doc:id="b3e76c39-2d00-4a37-95e1-f219b144bb28" type="APP:NOT_AN_ADMIN">
+			<set-payload value='#["Unauthorized"]' doc:name="Set Payload" doc:id="abc277b1-a252-4cef-b5c1-9f30f1ee6b7e" />
+		</on-error-continue>
+		<on-error-continue enableNotifications="true" logException="true" doc:name="On Error Continue" doc:id="96ddf2b5-65aa-476e-870b-aee495342361" type="APP:ACCOUNT_STATUS_UNKNOWN">
+			<set-payload value='#["Account status unknown."]' doc:name="Set Payload" doc:id="1ffccba0-fd36-44e8-a3dc-075432bc650e" />
+		</on-error-continue>
+	</error-handler>
+</mule>

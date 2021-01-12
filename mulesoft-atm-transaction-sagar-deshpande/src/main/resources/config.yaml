@@ -1,0 +1,18 @@
+db:
+  driver: ""
+  host: "atm-transactions.cle3hvjbemtn.ap-south-1.rds.amazonaws.com"
+  port: "3306"
+  username: "admin"
+  password: "Happy4ever"
+  database: "atm_transactions"
+  
+s3:
+  access-key: "AKIAI3GJ447O5BOHPKSQ"
+  secret-key: "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"
+  region: "ap-south-1"
+  
+email:
+  host: "smtp.gmail.com"
+  port: "587"
+  username: "deshpande.sagar1911@gmail.com"
+  password: "Ee004100"
